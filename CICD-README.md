@@ -11,7 +11,6 @@ This repository contains a comprehensive CI/CD pipeline for deploying the LUGX G
 - **Container Registry**: AWS ECR for secure image storage
 - **Infrastructure as Code**: Terraform for AWS infrastructure management
 - **Monitoring & Alerting**: CloudWatch integration with Slack notifications
-- **Hotfix Workflow**: Emergency deployment process for critical fixes
 - **Resource Cleanup**: Automated cleanup of old images and resources
 
 ## 📋 Prerequisites
@@ -98,20 +97,6 @@ The Terraform will create:
 3. **Deploy**: Rolling deployment to EKS
 4. **Integration Tests**: Post-deployment testing
 5. **Rollback**: Automatic rollback on failure
-
-### Hotfix Workflow (`hotfix.yml`)
-
-**Triggers:**
-
-- Push to `hotfix/*` branches
-- Manual dispatch for emergency fixes
-
-**Process:**
-
-1. **Fast Track**: Critical tests only
-2. **Selective Build**: Only changed services
-3. **Immediate Deploy**: Direct to production
-4. **Smoke Tests**: Basic health verification
 
 ### Infrastructure Management (`infrastructure.yml`)
 
@@ -366,13 +351,6 @@ EKS managed node groups automatically scale based on pod resource requirements.
 3. Create pull request to `develop`
 4. Automatic deployment to staging on merge
 5. Manual promotion to production
-
-### Hotfix Workflow
-
-1. Create hotfix branch from `main`
-2. Make minimal necessary changes
-3. Deploy directly to production via hotfix workflow
-4. Merge back to `main` and `develop`
 
 ### Release Process
 
