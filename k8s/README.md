@@ -203,6 +203,42 @@ Remove all resources:
 kubectl delete namespace lugx-gaming
 ```
 
+## 📊 Monitoring
+
+The LUGX Gaming Platform includes comprehensive monitoring with Prometheus and Grafana.
+
+### Deploy Monitoring Stack
+
+```powershell
+# Deploy with main application
+.\deploy.ps1
+
+# Or deploy only monitoring
+.\deploy-monitoring.ps1
+```
+
+### Access Monitoring
+
+- **Prometheus**: `http://localhost:30090`
+- **Grafana**: `http://localhost:30300` (admin/admin)
+
+### Features
+
+- ✅ Service Health Monitoring
+- ✅ Performance Metrics (CPU, Memory)
+- ✅ Availability Tracking
+- ✅ Pre-configured Dashboards
+- ✅ Alert Rules
+- ✅ Node-level Metrics
+
+### Validate Monitoring
+
+```powershell
+.\test-monitoring.ps1
+```
+
+For detailed monitoring documentation, see [MONITORING.md](MONITORING.md).
+
 ## Configuration Details
 
 ### Resource Limits

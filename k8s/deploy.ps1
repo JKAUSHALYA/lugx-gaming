@@ -88,6 +88,14 @@ kubectl apply -f "$ScriptDir\frontend.yaml"
 Write-Host "⏳ Waiting for all services to be ready..." -ForegroundColor Yellow
 kubectl wait --for=condition=available deployment --all -n lugx-gaming --timeout=300s
 
+# Ask if user wants to deploy monitoring
+Write-Host ""
+$deployMonitoring = Read-Host "🔍 Would you like to deploy Prometheus and Grafana monitoring? (Y/n)"
+if ($deployMonitoring -ne 'n' -and $deployMonitoring -ne 'N') {
+    Write-Host "📊 Deploying monitoring stack..." -ForegroundColor Cyan
+    & "$ScriptDir\deploy-monitoring.ps1"
+}
+
 Write-Host "🎉 Deployment completed successfully!" -ForegroundColor Green
 Write-Host ""
 
@@ -103,6 +111,10 @@ Write-Host "Order Service:     http://localhost:30081" -ForegroundColor White
 Write-Host "Analytics Service: http://localhost:30082" -ForegroundColor White
 Write-Host "ClickHouse HTTP:   http://localhost:30123" -ForegroundColor White
 Write-Host "ClickHouse Native: localhost:30900" -ForegroundColor White
+Write-Host ""
+Write-Host "📊 Monitoring URLs (if deployed):" -ForegroundColor Cyan
+Write-Host "Prometheus:        http://localhost:30090" -ForegroundColor White
+Write-Host "Grafana:           http://localhost:30300 (admin/admin)" -ForegroundColor White
 Write-Host ""
 
 Write-Host "📋 Useful Commands:" -ForegroundColor Cyan
