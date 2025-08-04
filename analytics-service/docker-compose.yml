@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  analytics-service:
+    build: .
+    container_name: analytics-service
+    ports:
+      - "8080:8080"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=analytics_user
+      - CLICKHOUSE_PASSWORD=password
+      - CLICKHOUSE_DB=analytics
+      - PORT=8080
+    networks:
+      - lugx-network
+
+networks:
+  lugx-network:
+    external: true

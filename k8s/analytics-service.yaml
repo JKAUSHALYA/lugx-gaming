@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: lugx-gaming
+  labels:
+    app: analytics-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/health"
+    spec:
+      containers:
+        - name: analytics-service
+          image: lugx-analytics-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: CLICKHOUSE_HOST
+              value: "clickhouse"
+            - name: CLICKHOUSE_PORT
+              value: "9000"
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-secret
+                  key: clickhouse-user
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-secret
+                  key: clickhouse-password
+            - name: CLICKHOUSE_DB
+              value: "analytics"
+            - name: PORT
+              value: "8080"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      initContainers:
+        - name: wait-for-clickhouse
+          image: busybox:1.35
+          command:
+            [
+              "sh",
+              "-c",
+              "until nc -z $CLICKHOUSE_HOST $CLICKHOUSE_PORT; do echo waiting for clickhouse; sleep 2; done;",
+            ]
+          env:
+            - name: CLICKHOUSE_HOST
+              value: "clickhouse"
+            - name: CLICKHOUSE_PORT
+              value: "9000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: lugx-gaming
+  labels:
+    app: analytics-service
+spec:
+  selector:
+    app: analytics-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service-external
+  namespace: lugx-gaming
+  labels:
+    app: analytics-service
+spec:
+  selector:
+    app: analytics-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30082
+  type: NodePort

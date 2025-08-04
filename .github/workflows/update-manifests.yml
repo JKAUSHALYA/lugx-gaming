@@ -1,0 +1,108 @@
+name: Update Kubernetes Manifests
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: us-east-1
+
+jobs:
+  update-manifests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Determine namespace
+      id: namespace
+      run: |
+        case "${{ inputs.environment }}" in
+          "production") echo "namespace=lugx-gaming-prod" >> $GITHUB_OUTPUT ;;
+          "staging") echo "namespace=lugx-gaming-staging" >> $GITHUB_OUTPUT ;;
+          "development") echo "namespace=lugx-gaming-dev" >> $GITHUB_OUTPUT ;;
+          *) echo "namespace=lugx-gaming-dev" >> $GITHUB_OUTPUT ;;
+        esac
+
+    - name: Update frontend manifest
+      run: |
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${{ inputs.image_tag }}
+        NAMESPACE=${{ steps.namespace.outputs.namespace }}
+        
+        # Create updated frontend manifest
+        sed "s|namespace: lugx-gaming|namespace: $NAMESPACE|g" k8s/frontend.yaml > frontend-updated.yaml
+        sed -i "s|lugx-gaming-frontend:latest|$REGISTRY/lugx-gaming-frontend:$IMAGE_TAG|g" frontend-updated.yaml
+        
+        # Apply rolling update strategy
+        cat >> frontend-updated.yaml << 'EOF'
+        
+        # Rolling update strategy override
+        spec:
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxUnavailable: 1
+              maxSurge: 1
+        EOF
+        
+        mv frontend-updated.yaml k8s/frontend-${{ inputs.environment }}.yaml
+
+    - name: Update game-service manifest
+      run: |
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${{ inputs.image_tag }}
+        NAMESPACE=${{ steps.namespace.outputs.namespace }}
+        
+        sed "s|namespace: lugx-gaming|namespace: $NAMESPACE|g" k8s/game-service.yaml > game-service-updated.yaml
+        sed -i "s|lugx-game-service:latest|$REGISTRY/lugx-gaming-game-service:$IMAGE_TAG|g" game-service-updated.yaml
+        mv game-service-updated.yaml k8s/game-service-${{ inputs.environment }}.yaml
+
+    - name: Update order-service manifest
+      run: |
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${{ inputs.image_tag }}
+        NAMESPACE=${{ steps.namespace.outputs.namespace }}
+        
+        sed "s|namespace: lugx-gaming|namespace: $NAMESPACE|g" k8s/order-service.yaml > order-service-updated.yaml
+        sed -i "s|lugx-order-service:latest|$REGISTRY/lugx-gaming-order-service:$IMAGE_TAG|g" order-service-updated.yaml
+        mv order-service-updated.yaml k8s/order-service-${{ inputs.environment }}.yaml
+
+    - name: Update analytics-service manifest
+      run: |
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${{ inputs.image_tag }}
+        NAMESPACE=${{ steps.namespace.outputs.namespace }}
+        
+        sed "s|namespace: lugx-gaming|namespace: $NAMESPACE|g" k8s/analytics-service.yaml > analytics-service-updated.yaml
+        sed -i "s|lugx-analytics-service:latest|$REGISTRY/lugx-gaming-analytics-service:$IMAGE_TAG|g" analytics-service-updated.yaml
+        mv analytics-service-updated.yaml k8s/analytics-service-${{ inputs.environment }}.yaml
+
+    - name: Upload updated manifests
+      uses: actions/upload-artifact@v3
+      with:
+        name: k8s-manifests-${{ inputs.environment }}
+        path: |
+          k8s/frontend-${{ inputs.environment }}.yaml
+          k8s/game-service-${{ inputs.environment }}.yaml
+          k8s/order-service-${{ inputs.environment }}.yaml
+          k8s/analytics-service-${{ inputs.environment }}.yaml

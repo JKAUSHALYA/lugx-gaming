@@ -1,0 +1,389 @@
+name: Infrastructure Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to setup'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - create
+          - destroy
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.5.0
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Create Terraform backend configuration
+      run: |
+        mkdir -p infrastructure
+        cat > infrastructure/backend.tf << EOF
+        terraform {
+          backend "s3" {
+            bucket         = "lugx-gaming-terraform-state"
+            key            = "${{ github.event.inputs.environment }}/terraform.tfstate"
+            region         = "${{ env.AWS_REGION }}"
+            encrypt        = true
+            dynamodb_table = "terraform-state-lock"
+          }
+        }
+        EOF
+
+    - name: Create infrastructure configuration
+      run: |
+        cat > infrastructure/main.tf << 'EOF'
+        # Provider configuration
+        terraform {
+          required_version = ">= 1.0"
+          required_providers {
+            aws = {
+              source  = "hashicorp/aws"
+              version = "~> 5.0"
+            }
+          }
+        }
+
+        provider "aws" {
+          region = var.aws_region
+        }
+
+        # Variables
+        variable "aws_region" {
+          description = "AWS region"
+          type        = string
+          default     = "us-east-1"
+        }
+
+        variable "environment" {
+          description = "Environment name"
+          type        = string
+        }
+
+        variable "cluster_name" {
+          description = "EKS cluster name"
+          type        = string
+          default     = "lugx-gaming-cluster"
+        }
+
+        # VPC Configuration
+        module "vpc" {
+          source = "terraform-aws-modules/vpc/aws"
+          version = "~> 5.0"
+
+          name = "lugx-gaming-vpc-${var.environment}"
+          cidr = "10.0.0.0/16"
+
+          azs             = ["${var.aws_region}a", "${var.aws_region}b", "${var.aws_region}c"]
+          private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+          public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+          enable_nat_gateway = true
+          enable_vpn_gateway = false
+          enable_dns_hostnames = true
+          enable_dns_support = true
+
+          tags = {
+            Environment = var.environment
+            Project     = "lugx-gaming"
+          }
+        }
+
+        # EKS Cluster
+        module "eks" {
+          source = "terraform-aws-modules/eks/aws"
+          version = "~> 19.0"
+
+          cluster_name    = "${var.cluster_name}-${var.environment}"
+          cluster_version = "1.28"
+
+          vpc_id     = module.vpc.vpc_id
+          subnet_ids = module.vpc.private_subnets
+
+          cluster_endpoint_private_access = true
+          cluster_endpoint_public_access  = true
+
+          eks_managed_node_groups = {
+            main = {
+              instance_types = ["t3.medium"]
+              min_size       = 1
+              max_size       = 10
+              desired_size   = 3
+
+              labels = {
+                Environment = var.environment
+                NodeGroup   = "main"
+              }
+            }
+          }
+
+          tags = {
+            Environment = var.environment
+            Project     = "lugx-gaming"
+          }
+        }
+
+        # RDS PostgreSQL
+        resource "aws_db_subnet_group" "postgres" {
+          name       = "lugx-gaming-postgres-${var.environment}"
+          subnet_ids = module.vpc.private_subnets
+
+          tags = {
+            Name        = "lugx-gaming-postgres-${var.environment}"
+            Environment = var.environment
+          }
+        }
+
+        resource "aws_security_group" "postgres" {
+          name_prefix = "lugx-gaming-postgres-${var.environment}"
+          vpc_id      = module.vpc.vpc_id
+
+          ingress {
+            from_port   = 5432
+            to_port     = 5432
+            protocol    = "tcp"
+            cidr_blocks = [module.vpc.vpc_cidr_block]
+          }
+
+          egress {
+            from_port   = 0
+            to_port     = 0
+            protocol    = "-1"
+            cidr_blocks = ["0.0.0.0/0"]
+          }
+
+          tags = {
+            Name        = "lugx-gaming-postgres-${var.environment}"
+            Environment = var.environment
+          }
+        }
+
+        resource "aws_db_instance" "postgres" {
+          identifier = "lugx-gaming-postgres-${var.environment}"
+
+          engine         = "postgres"
+          engine_version = "15.4"
+          instance_class = var.environment == "production" ? "db.t3.medium" : "db.t3.micro"
+
+          allocated_storage     = var.environment == "production" ? 100 : 20
+          max_allocated_storage = var.environment == "production" ? 1000 : 100
+          storage_encrypted     = true
+
+          db_name  = "lugx_gaming"
+          username = "postgres"
+          password = random_password.postgres_password.result
+
+          vpc_security_group_ids = [aws_security_group.postgres.id]
+          db_subnet_group_name   = aws_db_subnet_group.postgres.name
+
+          backup_retention_period = var.environment == "production" ? 7 : 1
+          backup_window          = "03:00-04:00"
+          maintenance_window     = "mon:04:00-mon:05:00"
+
+          skip_final_snapshot = var.environment != "production"
+          deletion_protection = var.environment == "production"
+
+          tags = {
+            Name        = "lugx-gaming-postgres-${var.environment}"
+            Environment = var.environment
+          }
+        }
+
+        resource "random_password" "postgres_password" {
+          length  = 16
+          special = true
+        }
+
+        # ECR Repositories
+        resource "aws_ecr_repository" "repositories" {
+          for_each = toset([
+            "lugx-gaming-frontend",
+            "lugx-gaming-game-service",
+            "lugx-gaming-order-service",
+            "lugx-gaming-analytics-service"
+          ])
+
+          name                 = each.value
+          image_tag_mutability = "MUTABLE"
+
+          image_scanning_configuration {
+            scan_on_push = true
+          }
+
+          tags = {
+            Environment = var.environment
+            Project     = "lugx-gaming"
+          }
+        }
+
+        # Secrets Manager for database credentials
+        resource "aws_secretsmanager_secret" "postgres_credentials" {
+          name = "lugx-gaming-postgres-${var.environment}"
+          description = "PostgreSQL credentials for LUGX Gaming ${var.environment}"
+
+          tags = {
+            Environment = var.environment
+            Project     = "lugx-gaming"
+          }
+        }
+
+        resource "aws_secretsmanager_secret_version" "postgres_credentials" {
+          secret_id = aws_secretsmanager_secret.postgres_credentials.id
+          secret_string = jsonencode({
+            username = aws_db_instance.postgres.username
+            password = random_password.postgres_password.result
+            host     = aws_db_instance.postgres.endpoint
+            port     = aws_db_instance.postgres.port
+            dbname   = aws_db_instance.postgres.db_name
+          })
+        }
+
+        # Application Load Balancer
+        resource "aws_security_group" "alb" {
+          name_prefix = "lugx-gaming-alb-${var.environment}"
+          vpc_id      = module.vpc.vpc_id
+
+          ingress {
+            from_port   = 80
+            to_port     = 80
+            protocol    = "tcp"
+            cidr_blocks = ["0.0.0.0/0"]
+          }
+
+          ingress {
+            from_port   = 443
+            to_port     = 443
+            protocol    = "tcp"
+            cidr_blocks = ["0.0.0.0/0"]
+          }
+
+          egress {
+            from_port   = 0
+            to_port     = 0
+            protocol    = "-1"
+            cidr_blocks = ["0.0.0.0/0"]
+          }
+
+          tags = {
+            Name        = "lugx-gaming-alb-${var.environment}"
+            Environment = var.environment
+          }
+        }
+
+        resource "aws_lb" "main" {
+          name               = "lugx-gaming-alb-${var.environment}"
+          internal           = false
+          load_balancer_type = "application"
+          security_groups    = [aws_security_group.alb.id]
+          subnets            = module.vpc.public_subnets
+
+          enable_deletion_protection = var.environment == "production"
+
+          tags = {
+            Name        = "lugx-gaming-alb-${var.environment}"
+            Environment = var.environment
+          }
+        }
+
+        # Outputs
+        output "cluster_endpoint" {
+          description = "Endpoint for EKS control plane"
+          value       = module.eks.cluster_endpoint
+        }
+
+        output "cluster_name" {
+          description = "Kubernetes Cluster Name"
+          value       = module.eks.cluster_name
+        }
+
+        output "postgres_endpoint" {
+          description = "RDS instance endpoint"
+          value       = aws_db_instance.postgres.endpoint
+          sensitive   = true
+        }
+
+        output "ecr_repositories" {
+          description = "ECR repository URLs"
+          value = {
+            for repo in aws_ecr_repository.repositories : repo.name => repo.repository_url
+          }
+        }
+
+        output "load_balancer_dns" {
+          description = "DNS name of the load balancer"
+          value       = aws_lb.main.dns_name
+        }
+        EOF
+
+    - name: Create terraform variables file
+      run: |
+        cat > infrastructure/terraform.tfvars << EOF
+        aws_region  = "${{ env.AWS_REGION }}"
+        environment = "${{ github.event.inputs.environment }}"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd infrastructure
+        terraform init
+
+    - name: Terraform Plan
+      if: github.event.inputs.action == 'create'
+      run: |
+        cd infrastructure
+        terraform plan -detailed-exitcode
+
+    - name: Terraform Apply
+      if: github.event.inputs.action == 'create'
+      run: |
+        cd infrastructure
+        terraform apply -auto-approve
+
+    - name: Terraform Destroy
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        cd infrastructure
+        terraform destroy -auto-approve
+
+    - name: Save outputs
+      if: github.event.inputs.action == 'create'
+      run: |
+        cd infrastructure
+        terraform output -json > terraform-outputs.json
+        
+        # Store important outputs as secrets (this would need manual setup)
+        echo "Please manually add the following secrets to your GitHub repository:"
+        echo "AWS_RDS_ENDPOINT: $(terraform output -raw postgres_endpoint)"
+        echo "AWS_RDS_DATABASE: lugx_gaming"
+        echo "EKS_CLUSTER_NAME: $(terraform output -raw cluster_name)"

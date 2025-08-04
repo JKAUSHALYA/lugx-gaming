@@ -1,0 +1,485 @@
+name: Deploy to AWS EKS
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: lugx-gaming-cluster
+  ECR_REPOSITORY_PREFIX: lugx-gaming
+  KUBE_NAMESPACE: lugx-gaming
+
+jobs:
+  # Build and test phase
+  build-and-test:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tags: ${{ steps.meta.outputs.tags }}
+      environment: ${{ steps.determine-env.outputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Determine environment
+      id: determine-env
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "environment=production" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          echo "environment=staging" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          echo "environment=production" >> $GITHUB_OUTPUT
+        else
+          echo "environment=development" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    # Unit tests for all services
+    - name: Run unit tests - Game Service
+      run: |
+        cd game-service
+        go mod download
+        go test -v ./...
+
+    - name: Run unit tests - Order Service
+      run: |
+        cd order-service
+        go mod download
+        go test -v ./...
+
+    - name: Run unit tests - Analytics Service
+      run: |
+        cd analytics-service
+        go mod download
+        go test -v ./...
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Extract metadata for Docker images
+      id: meta
+      run: |
+        # Create image tags based on git ref
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION=${{ github.sha }}
+        fi
+        
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        
+        echo "tags<<EOF" >> $GITHUB_OUTPUT
+        echo "frontend=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${VERSION}" >> $GITHUB_OUTPUT
+        echo "game-service=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${VERSION}" >> $GITHUB_OUTPUT
+        echo "order-service=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${VERSION}" >> $GITHUB_OUTPUT
+        echo "analytics-service=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${VERSION}" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    # Build and push Docker images in parallel
+    - name: Build and push Frontend image
+      run: |
+        cd front-end
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${{ github.sha }}
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+
+    - name: Build and push Game Service image
+      run: |
+        cd game-service
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${{ github.sha }}
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+
+    - name: Build and push Order Service image
+      run: |
+        cd order-service
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${{ github.sha }}
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+
+    - name: Build and push Analytics Service image
+      run: |
+        cd analytics-service
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${{ github.sha }}
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+
+  # Deploy phase
+  deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment: ${{ needs.build-and-test.outputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Setup environment-specific configuration
+      run: |
+        ENVIRONMENT=${{ needs.build-and-test.outputs.environment }}
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        
+        # Update namespace based on environment
+        if [ "$ENVIRONMENT" = "production" ]; then
+          NAMESPACE="lugx-gaming-prod"
+        elif [ "$ENVIRONMENT" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        else
+          NAMESPACE="lugx-gaming-dev"
+        fi
+        
+        echo "DEPLOYMENT_NAMESPACE=$NAMESPACE" >> $GITHUB_ENV
+        
+        # Update image tags in Kubernetes manifests
+        sed -i "s|lugx-gaming-frontend:latest|${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${{ github.sha }}|g" k8s/frontend.yaml
+        sed -i "s|lugx-game-service:latest|${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${{ github.sha }}|g" k8s/game-service.yaml
+        sed -i "s|lugx-order-service:latest|${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${{ github.sha }}|g" k8s/order-service.yaml
+        sed -i "s|lugx-analytics-service:latest|${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${{ github.sha }}|g" k8s/analytics-service.yaml
+        
+        # Update namespace in all manifests
+        find k8s/ -name "*.yaml" -exec sed -i "s|namespace: lugx-gaming|namespace: $NAMESPACE|g" {} \;
+
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace ${{ env.DEPLOYMENT_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Setup database connection for environment
+      run: |
+        # Configure AWS RDS PostgreSQL connection
+        # Update the ConfigMap with AWS RDS endpoint
+        cat > k8s/aws-db-config.yaml << EOF
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: external-services-config
+          namespace: ${{ env.DEPLOYMENT_NAMESPACE }}
+        data:
+          POSTGRES_HOST: "${{ secrets.AWS_RDS_ENDPOINT }}"
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: "${{ secrets.AWS_RDS_DATABASE }}"
+          POSTGRES_SSLMODE: "require"
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: external-db-secrets
+          namespace: ${{ env.DEPLOYMENT_NAMESPACE }}
+        type: Opaque
+        data:
+          postgres-user: $(echo -n "${{ secrets.AWS_RDS_USERNAME }}" | base64 -w 0)
+          postgres-password: $(echo -n "${{ secrets.AWS_RDS_PASSWORD }}" | base64 -w 0)
+        EOF
+
+    - name: Deploy database configuration
+      run: |
+        kubectl apply -f k8s/aws-db-config.yaml
+
+    - name: Deploy ClickHouse
+      run: |
+        kubectl apply -f k8s/clickhouse.yaml
+
+    # Rolling deployment strategy
+    - name: Deploy Game Service with rolling update
+      run: |
+        kubectl apply -f k8s/game-service.yaml
+        kubectl rollout status deployment/game-service -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=600s
+
+    - name: Deploy Order Service with rolling update
+      run: |
+        kubectl apply -f k8s/order-service.yaml
+        kubectl rollout status deployment/order-service -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=600s
+
+    - name: Deploy Analytics Service with rolling update
+      run: |
+        kubectl apply -f k8s/analytics-service.yaml
+        kubectl rollout status deployment/analytics-service -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=600s
+
+    - name: Deploy Frontend with rolling update
+      run: |
+        kubectl apply -f k8s/frontend.yaml
+        kubectl rollout status deployment/frontend -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=600s
+
+    - name: Wait for all pods to be ready
+      run: |
+        kubectl wait --for=condition=ready pod --all -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=600s
+
+    - name: Verify deployment health
+      run: |
+        echo "Checking deployment status..."
+        kubectl get pods -n ${{ env.DEPLOYMENT_NAMESPACE }}
+        kubectl get services -n ${{ env.DEPLOYMENT_NAMESPACE }}
+        
+        # Check if all deployments are available
+        kubectl get deployments -n ${{ env.DEPLOYMENT_NAMESPACE }} -o json | jq -r '.items[] | select(.status.readyReplicas != .status.replicas) | .metadata.name' | while read deployment; do
+          if [ ! -z "$deployment" ]; then
+            echo "Deployment $deployment is not fully ready"
+            exit 1
+          fi
+        done
+
+  # Integration tests
+  integration-tests:
+    needs: [build-and-test, deploy]
+    runs-on: ubuntu-latest
+    if: always() && needs.deploy.result == 'success'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Get service endpoints
+      run: |
+        ENVIRONMENT=${{ needs.build-and-test.outputs.environment }}
+        if [ "$ENVIRONMENT" = "production" ]; then
+          NAMESPACE="lugx-gaming-prod"
+        elif [ "$ENVIRONMENT" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        else
+          NAMESPACE="lugx-gaming-dev"
+        fi
+        
+        # Get LoadBalancer endpoints or use port-forward for testing
+        GAME_SERVICE_URL=$(kubectl get service game-service-external -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        ORDER_SERVICE_URL=$(kubectl get service order-service-external -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        ANALYTICS_SERVICE_URL=$(kubectl get service analytics-service-external -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        # If LoadBalancer URLs are not available, use port-forward
+        if [ -z "$GAME_SERVICE_URL" ]; then
+          kubectl port-forward service/game-service 8080:8080 -n $NAMESPACE &
+          GAME_SERVICE_URL="http://localhost:8080"
+        else
+          GAME_SERVICE_URL="http://$GAME_SERVICE_URL"
+        fi
+        
+        if [ -z "$ORDER_SERVICE_URL" ]; then
+          kubectl port-forward service/order-service 8081:8081 -n $NAMESPACE &
+          ORDER_SERVICE_URL="http://localhost:8081"
+        else
+          ORDER_SERVICE_URL="http://$ORDER_SERVICE_URL"
+        fi
+        
+        if [ -z "$ANALYTICS_SERVICE_URL" ]; then
+          kubectl port-forward service/analytics-service 8082:8082 -n $NAMESPACE &
+          ANALYTICS_SERVICE_URL="http://localhost:8082"
+        else
+          ANALYTICS_SERVICE_URL="http://$ANALYTICS_SERVICE_URL"
+        fi
+        
+        echo "GAME_SERVICE_URL=$GAME_SERVICE_URL" >> $GITHUB_ENV
+        echo "ORDER_SERVICE_URL=$ORDER_SERVICE_URL" >> $GITHUB_ENV
+        echo "ANALYTICS_SERVICE_URL=$ANALYTICS_SERVICE_URL" >> $GITHUB_ENV
+        
+        # Wait for port-forwards to establish
+        sleep 10
+
+    - name: Wait for services to be ready
+      run: |
+        echo "Waiting for services to be ready..."
+        max_attempts=30
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt/$max_attempts"
+          
+          game_ready=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.GAME_SERVICE_URL }}/health || echo "000")
+          order_ready=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.ORDER_SERVICE_URL }}/health || echo "000")
+          analytics_ready=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.ANALYTICS_SERVICE_URL }}/health || echo "000")
+          
+          echo "Game Service: $game_ready, Order Service: $order_ready, Analytics Service: $analytics_ready"
+          
+          if [ "$game_ready" = "200" ] && [ "$order_ready" = "200" ] && [ "$analytics_ready" = "200" ]; then
+            echo "All services are ready!"
+            break
+          fi
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Services failed to become ready within timeout"
+            exit 1
+          fi
+          
+          sleep 10
+          attempt=$((attempt + 1))
+        done
+
+    - name: Run integration tests
+      run: |
+        echo "Running integration tests against deployed services..."
+        
+        # Export service URLs for integration tests
+        export GAME_SERVICE_URL="${{ env.GAME_SERVICE_URL }}"
+        export ORDER_SERVICE_URL="${{ env.ORDER_SERVICE_URL }}"
+        export ANALYTICS_SERVICE_URL="${{ env.ANALYTICS_SERVICE_URL }}"
+        
+        # Run game service integration tests
+        cd integration-tests/game-service
+        go mod download
+        go test -v ./... -timeout=5m
+        
+        # Run order service integration tests
+        cd ../order-service
+        go mod download
+        go test -v ./... -timeout=5m
+        
+        # Run analytics service integration tests
+        cd ../analytics-service
+        go mod download
+        go test -v ./... -timeout=5m
+
+    - name: Cleanup port-forwards
+      if: always()
+      run: |
+        # Kill any port-forward processes
+        pkill -f "kubectl port-forward" || true
+
+  # Rollback on failure
+  rollback:
+    needs: [build-and-test, deploy, integration-tests]
+    runs-on: ubuntu-latest
+    if: always() && (needs.deploy.result == 'failure' || needs.integration-tests.result == 'failure')
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Rollback deployments
+      run: |
+        ENVIRONMENT=${{ needs.build-and-test.outputs.environment }}
+        if [ "$ENVIRONMENT" = "production" ]; then
+          NAMESPACE="lugx-gaming-prod"
+        elif [ "$ENVIRONMENT" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        else
+          NAMESPACE="lugx-gaming-dev"
+        fi
+        
+        echo "Rolling back deployments in namespace: $NAMESPACE"
+        
+        # Rollback all deployments to previous version
+        kubectl rollout undo deployment/game-service -n $NAMESPACE
+        kubectl rollout undo deployment/order-service -n $NAMESPACE
+        kubectl rollout undo deployment/analytics-service -n $NAMESPACE
+        kubectl rollout undo deployment/frontend -n $NAMESPACE
+        
+        # Wait for rollback to complete
+        kubectl rollout status deployment/game-service -n $NAMESPACE --timeout=300s
+        kubectl rollout status deployment/order-service -n $NAMESPACE --timeout=300s
+        kubectl rollout status deployment/analytics-service -n $NAMESPACE --timeout=300s
+        kubectl rollout status deployment/frontend -n $NAMESPACE --timeout=300s
+        
+        echo "Rollback completed successfully"
+
+  # Slack notification (optional)
+  notify:
+    needs: [build-and-test, deploy, integration-tests]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      if: env.SLACK_WEBHOOK_URL != ''
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

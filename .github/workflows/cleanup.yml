@@ -1,0 +1,283 @@
+name: Cleanup Resources
+
+on:
+  schedule:
+    # Run every Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      cleanup_type:
+        description: 'Type of cleanup to perform'
+        required: true
+        default: 'images'
+        type: choice
+        options:
+          - images
+          - failed_deployments
+          - old_secrets
+          - all
+      environment:
+        description: 'Environment to cleanup'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+          - all
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: lugx-gaming-cluster
+  ECR_REPOSITORY_PREFIX: lugx-gaming
+
+jobs:
+  cleanup-ecr-images:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'images' || github.event.inputs.cleanup_type == 'all' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cleanup old ECR images
+      run: |
+        echo "🧹 Cleaning up old ECR images..."
+        
+        REPOSITORIES=(
+          "${ECR_REPOSITORY_PREFIX}-frontend"
+          "${ECR_REPOSITORY_PREFIX}-game-service"
+          "${ECR_REPOSITORY_PREFIX}-order-service"
+          "${ECR_REPOSITORY_PREFIX}-analytics-service"
+        )
+        
+        for repo in "${REPOSITORIES[@]}"; do
+          echo "Cleaning repository: $repo"
+          
+          # Get all images older than 30 days (keeping latest 10)
+          OLD_IMAGES=$(aws ecr describe-images \
+            --repository-name $repo \
+            --query 'sort_by(imageDetails,& imagePushedAt)[:-10][?imagePushedAt<`'$(date -d '30 days ago' -I)'`].imageDigest' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ ! -z "$OLD_IMAGES" ]; then
+            echo "Found old images to delete in $repo"
+            for digest in $OLD_IMAGES; do
+              echo "Deleting image with digest: $digest"
+              aws ecr batch-delete-image \
+                --repository-name $repo \
+                --image-ids imageDigest=$digest || true
+            done
+          else
+            echo "No old images found in $repo"
+          fi
+        done
+        
+        echo "✅ ECR cleanup completed"
+
+  cleanup-kubernetes:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'failed_deployments' || github.event.inputs.cleanup_type == 'all'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Cleanup failed deployments
+      run: |
+        echo "🧹 Cleaning up failed Kubernetes resources..."
+        
+        ENVIRONMENT="${{ github.event.inputs.environment || 'all' }}"
+        
+        if [ "$ENVIRONMENT" = "all" ]; then
+          NAMESPACES=("lugx-gaming-dev" "lugx-gaming-staging" "lugx-gaming-prod")
+        elif [ "$ENVIRONMENT" = "development" ]; then
+          NAMESPACES=("lugx-gaming-dev")
+        elif [ "$ENVIRONMENT" = "staging" ]; then
+          NAMESPACES=("lugx-gaming-staging")
+        elif [ "$ENVIRONMENT" = "production" ]; then
+          NAMESPACES=("lugx-gaming-prod")
+        fi
+        
+        for namespace in "${NAMESPACES[@]}"; do
+          echo "Cleaning namespace: $namespace"
+          
+          # Check if namespace exists
+          if ! kubectl get namespace $namespace >/dev/null 2>&1; then
+            echo "Namespace $namespace does not exist, skipping..."
+            continue
+          fi
+          
+          # Clean up failed pods
+          echo "Removing failed pods in $namespace..."
+          kubectl delete pods --field-selector=status.phase=Failed -n $namespace || true
+          
+          # Clean up completed jobs older than 1 day
+          echo "Removing old completed jobs in $namespace..."
+          kubectl delete jobs --field-selector=status.successful=1 -n $namespace || true
+          
+          # Clean up evicted pods
+          echo "Removing evicted pods in $namespace..."
+          kubectl delete pods --field-selector=status.phase=Failed -n $namespace || true
+          
+          # List remaining resources for verification
+          echo "Remaining resources in $namespace:"
+          kubectl get all -n $namespace || true
+        done
+        
+        echo "✅ Kubernetes cleanup completed"
+
+  cleanup-secrets:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'old_secrets' || github.event.inputs.cleanup_type == 'all'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cleanup old AWS Secrets
+      run: |
+        echo "🧹 Cleaning up old AWS Secrets..."
+        
+        # Get all lugx-gaming secrets
+        SECRETS=$(aws secretsmanager list-secrets \
+          --query "SecretList[?contains(Name, 'lugx-gaming')].Name" \
+          --output text)
+        
+        for secret in $SECRETS; do
+          echo "Checking secret: $secret"
+          
+          # Get secret metadata
+          LAST_ACCESSED=$(aws secretsmanager describe-secret \
+            --secret-id $secret \
+            --query 'LastAccessedDate' \
+            --output text 2>/dev/null || echo "null")
+          
+          if [ "$LAST_ACCESSED" = "null" ]; then
+            echo "Secret $secret has never been accessed - keeping for safety"
+            continue
+          fi
+          
+          # Check if secret is older than 90 days
+          CUTOFF_DATE=$(date -d '90 days ago' +%Y-%m-%d)
+          if [[ "$LAST_ACCESSED" < "$CUTOFF_DATE" ]]; then
+            echo "Secret $secret is old and unused - marking for deletion"
+            # Schedule for deletion (7 day recovery window)
+            aws secretsmanager delete-secret \
+              --secret-id $secret \
+              --recovery-window-in-days 7 || true
+          else
+            echo "Secret $secret is recent - keeping"
+          fi
+        done
+        
+        echo "✅ Secrets cleanup completed"
+
+  cleanup-logs:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.cleanup_type == 'all' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cleanup CloudWatch logs
+      run: |
+        echo "🧹 Cleaning up old CloudWatch logs..."
+        
+        # Get all log groups related to lugx-gaming
+        LOG_GROUPS=$(aws logs describe-log-groups \
+          --log-group-name-prefix "/aws/eks/lugx-gaming" \
+          --query 'logGroups[].logGroupName' \
+          --output text)
+        
+        for log_group in $LOG_GROUPS; do
+          echo "Processing log group: $log_group"
+          
+          # Set retention policy to 14 days for development, 30 days for production
+          if [[ "$log_group" == *"prod"* ]]; then
+            RETENTION_DAYS=30
+          else
+            RETENTION_DAYS=14
+          fi
+          
+          aws logs put-retention-policy \
+            --log-group-name $log_group \
+            --retention-in-days $RETENTION_DAYS || true
+          
+          echo "Set retention policy for $log_group to $RETENTION_DAYS days"
+        done
+        
+        echo "✅ CloudWatch logs cleanup completed"
+
+  generate-cleanup-report:
+    needs: [cleanup-ecr-images, cleanup-kubernetes, cleanup-secrets, cleanup-logs]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Generate cleanup report
+      run: |
+        echo "📊 Cleanup Report - $(date)" > cleanup-report.txt
+        echo "=================================" >> cleanup-report.txt
+        echo "" >> cleanup-report.txt
+        
+        echo "ECR Images Cleanup: ${{ needs.cleanup-ecr-images.result || 'Skipped' }}" >> cleanup-report.txt
+        echo "Kubernetes Cleanup: ${{ needs.cleanup-kubernetes.result || 'Skipped' }}" >> cleanup-report.txt
+        echo "Secrets Cleanup: ${{ needs.cleanup-secrets.result || 'Skipped' }}" >> cleanup-report.txt
+        echo "Logs Cleanup: ${{ needs.cleanup-logs.result || 'Skipped' }}" >> cleanup-report.txt
+        echo "" >> cleanup-report.txt
+        
+        if [ "${{ needs.cleanup-ecr-images.result }}" = "failure" ] || 
+           [ "${{ needs.cleanup-kubernetes.result }}" = "failure" ] ||
+           [ "${{ needs.cleanup-secrets.result }}" = "failure" ] ||
+           [ "${{ needs.cleanup-logs.result }}" = "failure" ]; then
+          echo "⚠️ Some cleanup tasks failed. Please check the logs." >> cleanup-report.txt
+        else
+          echo "✅ All cleanup tasks completed successfully." >> cleanup-report.txt
+        fi
+        
+        cat cleanup-report.txt
+
+    - name: Upload cleanup report
+      uses: actions/upload-artifact@v3
+      with:
+        name: cleanup-report-${{ github.run_number }}
+        path: cleanup-report.txt
+
+    - name: Notify cleanup completion
+      if: github.event_name == 'schedule'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#ops'
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

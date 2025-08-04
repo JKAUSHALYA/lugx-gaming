@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  order-service:
+    build: .
+    ports:
+      - "8081:8081"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - DB_NAME=lugx_gaming
+      - DB_SSLMODE=disable
+      - PORT=8081
+    depends_on:
+      - postgres
+    networks:
+      - lugx-network
+
+volumes:
+  postgres_data:
+
+networks:
+  lugx-network:
+    external: true

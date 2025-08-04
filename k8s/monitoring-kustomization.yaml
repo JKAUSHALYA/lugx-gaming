@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: monitoring
+
+resources:
+  - monitoring-namespace.yaml
+  - prometheus-rbac.yaml
+  - prometheus-config.yaml
+  - prometheus.yaml
+  - grafana-config.yaml
+  - grafana.yaml
+  - node-exporter.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: lugx-gaming-monitoring
+  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: prom/prometheus
+    newTag: v2.45.0
+  - name: grafana/grafana
+    newTag: "10.0.0"
+  - name: quay.io/prometheus/node-exporter
+    newTag: v1.6.0

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  frontend:
+    build: .
+    ports:
+      - "3000:80"
+    container_name: lugx-gaming-frontend
+    restart: unless-stopped
+    networks:
+      - lugx-gaming-network
+
+networks:
+  lugx-gaming-network:
+    driver: bridge

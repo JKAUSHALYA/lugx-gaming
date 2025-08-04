@@ -1,0 +1,292 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: lugx-gaming
+data:
+  init.sql: |
+    -- Create analytics database
+    CREATE DATABASE IF NOT EXISTS analytics;
+
+    -- Create page_views table
+    CREATE TABLE IF NOT EXISTS analytics.page_views (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        user_agent String,
+        ip_address String,
+        page_url String,
+        page_title String,
+        referrer String,
+        timestamp DateTime DEFAULT now (),
+        page_load_time UInt32,
+        viewport_width UInt16,
+        viewport_height UInt16
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, session_id)
+    PARTITION BY
+        toDate (timestamp);
+
+    -- Create clicks table
+    CREATE TABLE IF NOT EXISTS analytics.clicks (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        page_url String,
+        element_tag String,
+        element_id String,
+        element_class String,
+        element_text String,
+        click_x UInt16,
+        click_y UInt16,
+        timestamp DateTime DEFAULT now ()
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, session_id)
+    PARTITION BY
+        toDate (timestamp);
+
+    -- Create scroll_depth table
+    CREATE TABLE IF NOT EXISTS analytics.scroll_depth (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        page_url String,
+        max_scroll_percentage UInt8,
+        total_page_height UInt32,
+        viewport_height UInt16,
+        timestamp DateTime DEFAULT now ()
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, session_id)
+    PARTITION BY
+        toDate (timestamp);
+
+    -- Create page_time table
+    CREATE TABLE IF NOT EXISTS analytics.page_time (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        page_url String,
+        time_on_page UInt32,
+        is_active_time UInt32,
+        timestamp DateTime DEFAULT now ()
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, session_id)
+    PARTITION BY
+        toDate (timestamp);
+
+    -- Create session_time table
+    CREATE TABLE IF NOT EXISTS analytics.session_time (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        start_time DateTime,
+        end_time DateTime,
+        total_session_duration UInt32,
+        pages_visited UInt16,
+        total_clicks UInt32,
+        device_type String,
+        browser String,
+        operating_system String
+    ) ENGINE = ReplacingMergeTree (end_time)
+    ORDER BY
+        session_id
+    PARTITION BY
+        toDate (start_time);
+
+    -- Create user_sessions table
+    CREATE TABLE IF NOT EXISTS analytics.user_sessions (
+        session_id String,
+        user_id String,
+        ip_address String,
+        user_agent String,
+        start_time DateTime DEFAULT now (),
+        end_time DateTime,
+        page_count UInt32 DEFAULT 0,
+        click_count UInt32 DEFAULT 0,
+        total_time_spent UInt32 DEFAULT 0
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (start_time, session_id)
+    PARTITION BY
+        toDate (start_time);
+
+    -- Create form_submissions table
+    CREATE TABLE IF NOT EXISTS analytics.form_submissions (
+        id UUID DEFAULT generateUUIDv4 (),
+        session_id String,
+        form_name String,
+        form_data String,
+        success Boolean,
+        error_message String,
+        timestamp DateTime DEFAULT now (),
+        user_agent String,
+        ip_address String
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, session_id)
+    PARTITION BY
+        toDate (timestamp);
+
+    -- Create api_requests table
+    CREATE TABLE IF NOT EXISTS analytics.api_requests (
+        id UUID DEFAULT generateUUIDv4 (),
+        method String,
+        endpoint String,
+        status_code UInt16,
+        response_time UInt32,
+        request_size UInt32,
+        response_size UInt32,
+        timestamp DateTime DEFAULT now (),
+        user_agent String,
+        ip_address String
+    ) ENGINE = MergeTree ()
+    ORDER BY
+        (timestamp, endpoint)
+    PARTITION BY
+        toDate (timestamp);
+
+  init-users.sql: |
+    -- Create analytics user with password
+    CREATE USER IF NOT EXISTS analytics_user IDENTIFIED WITH plaintext_password BY 'password';
+
+    -- Grant specific permissions for analytics database
+    GRANT SELECT, INSERT, CREATE TABLE, CREATE DATABASE ON *.* TO analytics_user;
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-secret
+  namespace: lugx-gaming
+type: Opaque
+data:
+  # Base64 encoded values
+  clickhouse-user: ZGVmYXVsdA== # default
+  clickhouse-password: cGFzc3dvcmQ= # password
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-data
+  namespace: lugx-gaming
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: lugx-gaming
+  labels:
+    app: clickhouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:23.8
+          ports:
+            - containerPort: 8123
+              name: http
+            - containerPort: 9000
+              name: native
+          env:
+            - name: CLICKHOUSE_DB
+              value: "analytics"
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-secret
+                  key: clickhouse-user
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-secret
+                  key: clickhouse-password
+          volumeMounts:
+            - name: clickhouse-data
+              mountPath: /var/lib/clickhouse
+            - name: clickhouse-config
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: clickhouse-data
+          persistentVolumeClaim:
+            claimName: clickhouse-data
+        - name: clickhouse-config
+          configMap:
+            name: clickhouse-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: lugx-gaming
+  labels:
+    app: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+    - port: 8123
+      targetPort: 8123
+      name: http
+    - port: 9000
+      targetPort: 9000
+      name: native
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-external
+  namespace: lugx-gaming
+  labels:
+    app: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+    - port: 8123
+      targetPort: 8123
+      nodePort: 30123
+      name: http
+    - port: 9000
+      targetPort: 9000
+      nodePort: 30900
+      name: native
+  type: NodePort

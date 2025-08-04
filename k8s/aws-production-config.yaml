@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-services-config
+  namespace: lugx-gaming-prod
+data:
+  # AWS RDS PostgreSQL Configuration
+  POSTGRES_HOST: "REPLACE_WITH_RDS_ENDPOINT"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "lugx_gaming"
+  POSTGRES_SSLMODE: "require"
+  
+  # Environment specific settings
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  
+  # Analytics ClickHouse Configuration
+  CLICKHOUSE_HOST: "clickhouse"
+  CLICKHOUSE_PORT: "9000"
+  CLICKHOUSE_DB: "analytics"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: external-db-secrets
+  namespace: lugx-gaming-prod
+type: Opaque
+data:
+  # These will be replaced by the CI/CD pipeline with actual AWS RDS credentials
+  # The values are base64 encoded
+  postgres-user: REPLACE_WITH_BASE64_USERNAME
+  postgres-password: REPLACE_WITH_BASE64_PASSWORD
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-secrets
+  namespace: lugx-gaming-prod
+type: Opaque
+data:
+  # AWS credentials for services that need direct AWS access
+  aws-access-key-id: REPLACE_WITH_BASE64_ACCESS_KEY
+  aws-secret-access-key: REPLACE_WITH_BASE64_SECRET_KEY
+
+---
+# Network Policy for production security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lugx-gaming-network-policy
+  namespace: lugx-gaming-prod
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: lugx-gaming-prod
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  egress:
+  - {} # Allow all egress for now, can be restricted further
+
+---
+# Resource quotas for production namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: lugx-gaming-quota
+  namespace: lugx-gaming-prod
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "20"
+    services: "10"
+    persistentvolumeclaims: "5"
+
+---
+# Limit ranges for production
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: lugx-gaming-limits
+  namespace: lugx-gaming-prod
+spec:
+  limits:
+  - default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    type: Container

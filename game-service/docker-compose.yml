@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  game-service:
+    build: .
+    container_name: lugx-game-service
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: password
+      DB_NAME: lugx_gaming
+      DB_SSLMODE: disable
+      PORT: 8080
+      GIN_MODE: release
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - lugx-network
+
+volumes:
+  postgres_data:
+
+networks:
+  lugx-network:
+    external: true

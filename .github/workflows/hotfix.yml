@@ -1,0 +1,302 @@
+name: Hotfix Deployment
+
+on:
+  push:
+    branches: [hotfix/*]
+  workflow_dispatch:
+    inputs:
+      hotfix_branch:
+        description: 'Hotfix branch to deploy'
+        required: true
+        type: string
+      target_environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: lugx-gaming-cluster
+  ECR_REPOSITORY_PREFIX: lugx-gaming
+
+jobs:
+  hotfix-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout hotfix branch
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.hotfix_branch || github.ref }}
+
+    - name: Validate hotfix branch
+      run: |
+        BRANCH_NAME=$(git branch --show-current)
+        if [[ ! "$BRANCH_NAME" =~ ^hotfix/ ]]; then
+          echo "❌ This workflow only runs on hotfix branches (hotfix/*)"
+          exit 1
+        fi
+        echo "✅ Deploying hotfix branch: $BRANCH_NAME"
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run critical tests only
+      run: |
+        echo "Running critical tests for hotfix..."
+        
+        # Run only critical/smoke tests for faster deployment
+        cd game-service
+        go test -run "TestHealthCheck|TestCritical" -v ./...
+        
+        cd ../order-service
+        go test -run "TestHealthCheck|TestCritical" -v ./...
+        
+        cd ../analytics-service
+        go test -run "TestHealthCheck|TestCritical" -v ./...
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and push hotfix images
+      run: |
+        REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        HOTFIX_TAG="hotfix-${{ github.sha }}"
+        
+        # Build only affected services (detect changes)
+        if git diff --name-only HEAD~1 | grep -q "^front-end/"; then
+          echo "Building frontend hotfix..."
+          cd front-end
+          docker build -t ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${HOTFIX_TAG} .
+          docker push ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${HOTFIX_TAG}
+          echo "FRONTEND_IMAGE=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-frontend:${HOTFIX_TAG}" >> $GITHUB_ENV
+          cd ..
+        fi
+        
+        if git diff --name-only HEAD~1 | grep -q "^game-service/"; then
+          echo "Building game-service hotfix..."
+          cd game-service
+          docker build -t ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${HOTFIX_TAG} .
+          docker push ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${HOTFIX_TAG}
+          echo "GAME_SERVICE_IMAGE=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-game-service:${HOTFIX_TAG}" >> $GITHUB_ENV
+          cd ..
+        fi
+        
+        if git diff --name-only HEAD~1 | grep -q "^order-service/"; then
+          echo "Building order-service hotfix..."
+          cd order-service
+          docker build -t ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${HOTFIX_TAG} .
+          docker push ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${HOTFIX_TAG}
+          echo "ORDER_SERVICE_IMAGE=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-order-service:${HOTFIX_TAG}" >> $GITHUB_ENV
+          cd ..
+        fi
+        
+        if git diff --name-only HEAD~1 | grep -q "^analytics-service/"; then
+          echo "Building analytics-service hotfix..."
+          cd analytics-service
+          docker build -t ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${HOTFIX_TAG} .
+          docker push ${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${HOTFIX_TAG}
+          echo "ANALYTICS_SERVICE_IMAGE=${REGISTRY}/${ECR_REPOSITORY_PREFIX}-analytics-service:${HOTFIX_TAG}" >> $GITHUB_ENV
+          cd ..
+        fi
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Create backup of current deployment
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'production' }}"
+        NAMESPACE="lugx-gaming-prod"
+        if [ "$TARGET_ENV" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        fi
+        
+        echo "Creating backup of current deployment in $NAMESPACE..."
+        
+        # Backup current deployment configs
+        kubectl get deployment game-service -n $NAMESPACE -o yaml > game-service-backup.yaml 2>/dev/null || true
+        kubectl get deployment order-service -n $NAMESPACE -o yaml > order-service-backup.yaml 2>/dev/null || true
+        kubectl get deployment analytics-service -n $NAMESPACE -o yaml > analytics-service-backup.yaml 2>/dev/null || true
+        kubectl get deployment frontend -n $NAMESPACE -o yaml > frontend-backup.yaml 2>/dev/null || true
+        
+        echo "Backup completed"
+
+    - name: Apply hotfix deployment
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'production' }}"
+        NAMESPACE="lugx-gaming-prod"
+        if [ "$TARGET_ENV" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        fi
+        
+        echo "Applying hotfix to $NAMESPACE..."
+        
+        # Deploy only changed services with zero-downtime rolling update
+        if [ ! -z "$FRONTEND_IMAGE" ]; then
+          echo "Updating frontend with hotfix..."
+          kubectl set image deployment/frontend frontend=$FRONTEND_IMAGE -n $NAMESPACE
+          kubectl rollout status deployment/frontend -n $NAMESPACE --timeout=300s
+        fi
+        
+        if [ ! -z "$GAME_SERVICE_IMAGE" ]; then
+          echo "Updating game-service with hotfix..."
+          kubectl set image deployment/game-service game-service=$GAME_SERVICE_IMAGE -n $NAMESPACE
+          kubectl rollout status deployment/game-service -n $NAMESPACE --timeout=300s
+        fi
+        
+        if [ ! -z "$ORDER_SERVICE_IMAGE" ]; then
+          echo "Updating order-service with hotfix..."
+          kubectl set image deployment/order-service order-service=$ORDER_SERVICE_IMAGE -n $NAMESPACE
+          kubectl rollout status deployment/order-service -n $NAMESPACE --timeout=300s
+        fi
+        
+        if [ ! -z "$ANALYTICS_SERVICE_IMAGE" ]; then
+          echo "Updating analytics-service with hotfix..."
+          kubectl set image deployment/analytics-service analytics-service=$ANALYTICS_SERVICE_IMAGE -n $NAMESPACE
+          kubectl rollout status deployment/analytics-service -n $NAMESPACE --timeout=300s
+        fi
+
+    - name: Verify hotfix deployment
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'production' }}"
+        NAMESPACE="lugx-gaming-prod"
+        if [ "$TARGET_ENV" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        fi
+        
+        echo "Verifying hotfix deployment..."
+        
+        # Check all pods are running
+        kubectl get pods -n $NAMESPACE
+        
+        # Check deployment status
+        kubectl get deployments -n $NAMESPACE
+        
+        # Basic health checks
+        max_attempts=10
+        attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+          echo "Health check attempt $attempt/$max_attempts"
+          
+          # Check if all deployments are ready
+          ready_deployments=$(kubectl get deployments -n $NAMESPACE -o json | jq '.items[] | select(.status.readyReplicas == .status.replicas) | .metadata.name' | wc -l)
+          total_deployments=$(kubectl get deployments -n $NAMESPACE -o json | jq '.items | length')
+          
+          echo "Ready deployments: $ready_deployments/$total_deployments"
+          
+          if [ "$ready_deployments" -eq "$total_deployments" ]; then
+            echo "✅ All deployments are ready!"
+            break
+          fi
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "❌ Hotfix deployment failed - some services are not ready"
+            exit 1
+          fi
+          
+          sleep 30
+          attempt=$((attempt + 1))
+        done
+
+    - name: Run post-deployment smoke tests
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'production' }}"
+        NAMESPACE="lugx-gaming-prod"
+        if [ "$TARGET_ENV" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        fi
+        
+        echo "Running smoke tests..."
+        
+        # Port forward to services for testing
+        kubectl port-forward service/game-service 8080:8080 -n $NAMESPACE &
+        kubectl port-forward service/order-service 8081:8081 -n $NAMESPACE &
+        kubectl port-forward service/analytics-service 8082:8082 -n $NAMESPACE &
+        
+        sleep 10
+        
+        # Basic smoke tests
+        echo "Testing game service health..."
+        curl -f http://localhost:8080/health || (echo "Game service health check failed" && exit 1)
+        
+        echo "Testing order service health..."
+        curl -f http://localhost:8081/health || (echo "Order service health check failed" && exit 1)
+        
+        echo "Testing analytics service health..."
+        curl -f http://localhost:8082/health || (echo "Analytics service health check failed" && exit 1)
+        
+        echo "✅ Smoke tests passed!"
+        
+        # Cleanup port forwards
+        pkill -f "kubectl port-forward" || true
+
+    - name: Notify deployment success
+      if: success()
+      run: |
+        echo "🚀 Hotfix deployment completed successfully!"
+        echo "Branch: $(git branch --show-current)"
+        echo "Commit: ${{ github.sha }}"
+        echo "Environment: ${{ github.event.inputs.target_environment || 'production' }}"
+
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'production' }}"
+        NAMESPACE="lugx-gaming-prod"
+        if [ "$TARGET_ENV" = "staging" ]; then
+          NAMESPACE="lugx-gaming-staging"
+        fi
+        
+        echo "🔄 Rolling back hotfix deployment..."
+        
+        # Rollback deployments that were updated
+        if [ ! -z "$FRONTEND_IMAGE" ]; then
+          kubectl rollout undo deployment/frontend -n $NAMESPACE
+        fi
+        
+        if [ ! -z "$GAME_SERVICE_IMAGE" ]; then
+          kubectl rollout undo deployment/game-service -n $NAMESPACE
+        fi
+        
+        if [ ! -z "$ORDER_SERVICE_IMAGE" ]; then
+          kubectl rollout undo deployment/order-service -n $NAMESPACE
+        fi
+        
+        if [ ! -z "$ANALYTICS_SERVICE_IMAGE" ]; then
+          kubectl rollout undo deployment/analytics-service -n $NAMESPACE
+        fi
+        
+        echo "❌ Hotfix deployment failed and was rolled back"
+
+    - name: Emergency notification
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#alerts'
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

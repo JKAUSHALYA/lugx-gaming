@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: lugx-gaming
+
+resources:
+  - namespace.yaml
+  - external-services.yaml
+  - clickhouse.yaml
+  - game-service.yaml
+  - order-service.yaml
+  - analytics-service.yaml
+  - frontend.yaml
+
+commonLabels:
+  app.kubernetes.io/name: lugx-gaming
+  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: lugx-gaming-frontend
+    newTag: latest
+  - name: lugx-game-service
+    newTag: latest
+  - name: lugx-order-service
+    newTag: latest
+  - name: lugx-analytics-service
+    newTag: latest
