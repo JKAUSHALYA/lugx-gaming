@@ -1,0 +1,73 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, build, and coverage files
+*.test
+*.out
+*.log
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Go build artifacts
+*.o
+*.a
+*.out
+*.exe
+*.test
+
+# Python artifacts
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Kubernetes
+*.yaml
+*.yml
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Miscellaneous
+*.bak
+*.tmp
+*.old
+*.orig
+*.rej
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+
+# Frontend build artifacts
+dist/
+public/
+
+# Ignore ClickHouse and Postgres data
+clickhouse/
+postgres/

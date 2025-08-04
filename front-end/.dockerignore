@@ -1,0 +1,25 @@
+# Docker ignore file for front-end
+# Ignore Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Ignore common development files
+.git
+.gitignore
+*.md
+README*
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Ignore editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Ignore logs
+*.log
