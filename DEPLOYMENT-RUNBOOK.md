@@ -2,15 +2,15 @@
 
 **Version**: 1.0.0  
 **Last Updated**: $(Get-Date -Format "yyyy-MM-dd")  
-**Author**: DevOps Team
+**Author**: M G J Kaushalya
 
 ---
 
-## 📋 Overview
+## Overview
 
 This runbook provides step-by-step instructions for deploying and testing the LUGX Gaming platform across different environments (local, Kubernetes, and AWS EKS).
 
-## 🎯 Deployment Options
+## Deployment Options
 
 - **Local Development**: Docker Compose for rapid development
 - **Kubernetes**: Local or cloud Kubernetes cluster
@@ -28,19 +28,19 @@ Write-Host "Checking prerequisites..." -ForegroundColor Yellow
 
 # Docker
 docker --version
-if ($LASTEXITCODE -ne 0) { Write-Host "❌ Docker not installed" -ForegroundColor Red; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host "Docker not installed" -ForegroundColor Red; exit 1 }
 
 # kubectl (for Kubernetes deployments)
 kubectl version --client
-if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ kubectl not installed (required for K8s)" -ForegroundColor Yellow }
+if ($LASTEXITCODE -ne 0) { Write-Host "kubectl not installed (required for K8s)" -ForegroundColor Yellow }
 
 # AWS CLI (for EKS deployments)
 aws --version
-if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ AWS CLI not installed (required for EKS)" -ForegroundColor Yellow }
+if ($LASTEXITCODE -ne 0) { Write-Host "AWS CLI not installed (required for EKS)" -ForegroundColor Yellow }
 
 # Go (for local service development)
 go version
-if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Go not installed (required for local dev)" -ForegroundColor Yellow }
+if ($LASTEXITCODE -ne 0) { Write-Host "Go not installed (required for local dev)" -ForegroundColor Yellow }
 ```
 
 ### Environment Variables
@@ -61,7 +61,7 @@ $env:DB_PASSWORD = "password"
 
 ---
 
-## 🚀 Deployment Procedures
+## Deployment Procedures
 
 ## Option 1: Local Development Deployment
 
@@ -82,9 +82,9 @@ docker ps | findstr postgres
 **Expected Output:**
 
 ```
-✓ Network 'lugx-network' created successfully
-✓ PostgreSQL started successfully
-✓ PostgreSQL is ready and accepting connections
+Network 'lugx-network' created successfully
+PostgreSQL started successfully
+PostgreSQL is ready and accepting connections
 ```
 
 ### Step 2: Start Backend Services
@@ -181,14 +181,14 @@ kubectl get pods -w
 **Expected Output:**
 
 ```
-🚀 LUGX Gaming Kubernetes Deployment
+LUGX Gaming Kubernetes Deployment
 =====================================
-🔨 Building lugx-gaming-frontend...
-✅ Successfully built lugx-gaming-frontend
-🔨 Building lugx-game-service...
-✅ Successfully built lugx-game-service
+Building lugx-gaming-frontend...
+Successfully built lugx-gaming-frontend
+Building lugx-game-service...
+Successfully built lugx-game-service
 ...
-✅ All services deployed successfully!
+All services deployed successfully!
 ```
 
 ### Step 4: Verify Kubernetes Deployment
@@ -254,15 +254,15 @@ cd scripts
 **Expected Output:**
 
 ```
-🚀 Starting AWS EKS deployment...
-✅ AWS credentials verified
-✅ EKS cluster connection established
-🔨 Building and pushing images to ECR...
-✅ Images pushed successfully
-🚀 Deploying to EKS...
-✅ Deployment completed successfully
-🧪 Running integration tests...
-✅ All tests passed
+Starting AWS EKS deployment...
+AWS credentials verified
+EKS cluster connection established
+Building and pushing images to ECR...
+Images pushed successfully
+Deploying to EKS...
+Deployment completed successfully
+Running integration tests...
+All tests passed
 ```
 
 ### Step 4: Verify EKS Deployment
@@ -296,10 +296,10 @@ $services = @(
 foreach ($service in $services) {
     try {
         $response = Invoke-RestMethod -Uri $service.URL -Method GET -TimeoutSec 10
-        Write-Host "✅ $($service.Name): $($response.status)" -ForegroundColor Green
+        Write-Host "$($service.Name): $($response.status)" -ForegroundColor Green
     }
     catch {
-        Write-Host "❌ $($service.Name): Failed" -ForegroundColor Red
+        Write-Host "$($service.Name): Failed" -ForegroundColor Red
     }
 }
 ```
@@ -321,12 +321,12 @@ cd integration-tests
 **Expected Output:**
 
 ```
-🧪 Running Integration Tests for LUGX Gaming Platform
+Running Integration Tests for LUGX Gaming Platform
 =====================================================
-✅ Game Service: All 12 tests passed
-✅ Order Service: All 8 tests passed
-✅ Analytics Service: All 6 tests passed
-🎉 All integration tests completed successfully!
+Game Service: All 12 tests passed
+Order Service: All 8 tests passed
+Analytics Service: All 6 tests passed
+All integration tests completed successfully!
 ```
 
 ### Step 3: End-to-End Testing
@@ -338,18 +338,18 @@ $baseUrl = "http://localhost:3000"  # or load balancer URL for EKS
 # 1. Frontend accessibility
 $response = Invoke-WebRequest -Uri $baseUrl
 if ($response.StatusCode -eq 200) {
-    Write-Host "✅ Frontend accessible" -ForegroundColor Green
+    Write-Host "Frontend accessible" -ForegroundColor Green
 } else {
-    Write-Host "❌ Frontend not accessible" -ForegroundColor Red
+    Write-Host "Frontend not accessible" -ForegroundColor Red
 }
 
 # 2. Game catalog loading
 $gameService = "http://localhost:8080/api/games"
 $games = Invoke-RestMethod -Uri $gameService
 if ($games.Count -gt 0) {
-    Write-Host "✅ Game catalog loaded: $($games.Count) games" -ForegroundColor Green
+    Write-Host "Game catalog loaded: $($games.Count) games" -ForegroundColor Green
 } else {
-    Write-Host "❌ Game catalog empty" -ForegroundColor Red
+    Write-Host "Game catalog empty" -ForegroundColor Red
 }
 
 # 3. Order creation test
@@ -362,9 +362,9 @@ $orderData = @{
 
 try {
     $order = Invoke-RestMethod -Uri $orderService -Method POST -Body $orderData -ContentType "application/json"
-    Write-Host "✅ Order created: ID $($order.id)" -ForegroundColor Green
+    Write-Host "Order created: ID $($order.id)" -ForegroundColor Green
 } catch {
-    Write-Host "❌ Order creation failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Order creation failed: $($_.Exception.Message)" -ForegroundColor Red
 }
 ```
 
@@ -392,7 +392,7 @@ foreach ($endpoint in $endpoints) {
     $endTime = Get-Date
     $duration = ($endTime - $startTime).TotalMilliseconds
 
-    Write-Host "✅ 10 requests completed in $([math]::Round($duration, 2))ms" -ForegroundColor Green
+    Write-Host "10 requests completed in $([math]::Round($duration, 2))ms" -ForegroundColor Green
     Write-Host "   Average: $([math]::Round($duration/10, 2))ms per request" -ForegroundColor Cyan
 }
 ```
@@ -442,7 +442,7 @@ psql -h localhost -U postgres -d lugx_gaming -c "\dt"
 
 ---
 
-## 🚨 Troubleshooting
+## Troubleshooting
 
 ### Common Issues and Solutions
 
@@ -515,7 +515,7 @@ kubectl scale deployment/analytics-service --replicas=0
 
 ---
 
-## 🧹 Cleanup Procedures
+## Cleanup Procedures
 
 ### Local Environment Cleanup
 
@@ -558,7 +558,7 @@ terraform destroy
 
 ---
 
-## 📊 Deployment Checklist
+## Deployment Checklist
 
 ### Pre-Deployment
 
@@ -596,7 +596,7 @@ terraform destroy
 
 ---
 
-## 📞 Support and Escalation
+## Support and Escalation
 
 ### Support Contacts
 
@@ -620,7 +620,7 @@ terraform destroy
 
 ---
 
-## 📝 Change Log
+## Change Log
 
 | Version | Date       | Changes                  |
 | ------- | ---------- | ------------------------ |

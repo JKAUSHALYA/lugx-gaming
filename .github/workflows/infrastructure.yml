@@ -94,7 +94,7 @@ jobs:
         variable "cluster_name" {
           description = "EKS cluster name"
           type        = string
-          default     = "lugx-gaming-cluster"
+          default     = "lgx-g"
         }
 
         # VPC Configuration
