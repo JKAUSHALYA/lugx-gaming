@@ -362,6 +362,10 @@ jobs:
         environment = "${{ github.event.inputs.environment }}"
         EOF
 
+    - name: Clean Terraform cache
+      run: |
+        rm -rf infrastructure/.terraform
+
     - name: Terraform Init
       run: |
         cd infrastructure
