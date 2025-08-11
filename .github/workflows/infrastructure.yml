@@ -125,6 +125,15 @@ jobs:
           source = "terraform-aws-modules/eks/aws"
           version = "~> 19.0"
 
+          manage_aws_auth = true
+          aws_auth_roles = [
+            {
+              rolearn  = "arn:aws:iam:745107631491:role/lugx-gaming-github-actions"
+              username = "github-actions"
+              groups   = ["system:masters"]
+            }
+          ]
+
           cluster_name    = "${var.cluster_name}-${var.environment}"
           cluster_version = "1.28"
 
