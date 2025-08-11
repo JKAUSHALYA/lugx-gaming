@@ -123,7 +123,7 @@ jobs:
         # EKS Cluster
         module "eks" {
           source = "terraform-aws-modules/eks/aws"
-          version = "~> 19.0"
+          version = "~> 20.0"
 
           manage_aws_auth = true
           aws_auth_roles = [
